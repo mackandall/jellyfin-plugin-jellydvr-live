@@ -43,9 +43,17 @@ The buffer list lives at `<data>/jellydvr-live/buffers.json` so the other JellyD
 - `POST` / `DELETE /JellyDvrLive/Keep/{bufferId}` — keep / un-keep.
 - `GET /JellyDvrLive/Status` — everything (admin).
 
+## Web player buttons
+
+While a live channel plays in jellyfin-web, two buttons appear next to the player's Settings button:
+**Buffer** (history icon) opens the buffer recording at the moment you're watching — then the normal
+recording controls rewind past tune-in and skip commercials — and **Keep** (bookmark icon) keeps the
+programme on now. While a buffer recording plays, only Keep shows. Pausing stays on the live stream.
+
 ## Install
 
 ```
 dotnet build -c Release
-sudo ./install.sh   # restarts Jellyfin
+sudo ./install.sh       # restarts Jellyfin
+sudo ./install-web.sh   # once, and after every jellyfin-web upgrade; then reload the browser tab
 ```
