@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>JellyDVR Live</title>
+</head>
+<body>
+<div id="DvrLiveConfigPage"
+     data-role="page"
+     class="page type-interior pluginConfigurationPage"
+     data-require="emby-input,emby-button,emby-select">
+    <div data-role="content">
+        <div class="content-primary">
+
+            <div class="verticalSection">
+                <h2>Live TV buffer</h2>
+                <div class="fieldDescription">
+                    While someone watches a channel, the programme on it is recorded from the moment they tuned in, as a
+                    normal recording sharing their tuner stream. Pausing stays on the live stream; the buffer is for
+                    rewinding past tune-in, carrying on from another device, skipping commercials, or keeping the
+                    programme. Buffers are tagged "<span id="DlTagName">Live buffer</span>" until kept, and deleted once
+                    nobody has watched them for a while.
+                </div>
+            </div>
+
+            <form id="DvrLiveConfigForm">
+                <div class="verticalSection">
+                    <div class="selectContainer">
+                        <label class="selectLabel" for="DlMode">Buffering</label>
+                        <select is="emby-select" id="DlMode" class="emby-select-withcolor emby-select">
+                            <option value="from-tune-in">From tune-in: buffer every channel being watched</option>
+                            <option value="on-demand">On demand: only when a viewer asks</option>
+                            <option value="off">Off</option>
+                        </select>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="DlKeepBuffering">Keep buffering after the last viewer leaves (minutes)</label>
+                        <input id="DlKeepBuffering" type="number" min="0" max="240" is="emby-input" />
+                        <div class="fieldDescription">Covers a quick channel change and apps that vanish without saying goodbye.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="DlDeleteAfter">Delete unkept buffers this long after they were last watched (hours)</label>
+                        <input id="DlDeleteAfter" type="number" min="0" max="720" is="emby-input" />
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </div>
+            </form>
+
+            <div class="verticalSection">
+                <h2>Buffers</h2>
+                <table style="width:100%;border-collapse:collapse;font-size:.9em;">
+                    <thead><tr style="text-align:left;opacity:.7;">
+                        <th style="padding:.3em;">Programme</th><th>Channel</th><th>Started</th><th>State</th><th></th>
+                    </tr></thead>
+                    <tbody id="DlBuffers"></tbody>
+                </table>
+                <div id="DlNone" class="fieldDescription">None right now.</div>
+            </div>
+
+            <div class="verticalSection">
+                <h2>Watching live now</h2>
+                <div id="DlViewers" class="fieldDescription" style="white-space:pre-line;">Nobody.</div>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        (function () {
+            var pluginUniqueId = "cfd76dc2-a07d-4fc9-a2d9-c5d2aaa67215";
+            var page = document.querySelector("#DvrLiveConfigPage");
+            var timer = null;
+
+            function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+            function api(method, path) {
+                return ApiClient.ajax({ type: method, url: ApiClient.getUrl(path), dataType: "json" });
+            }
+            function time(t) { return t ? new Date(t).toLocaleString() : ""; }
+
+            function state(b) {
+                if (b.Kept) { return b.Recording ? "kept · recording" : "kept"; }
+                if (!b.Owned) { return (b.Recording ? "recording" : "recorded") + " (scheduled recording)"; }
+                return b.Recording ? "buffering" : "buffer · last watched " + time(b.LastViewerUtc);
+            }
+
+            function load() {
+                return api("GET", "JellyDvrLive/Status").then(function (s) {
+                    var body = page.querySelector("#DlBuffers");
+                    body.innerHTML = "";
+                    page.querySelector("#DlNone").style.display = (s.Buffers || []).length ? "none" : "";
+                    (s.Buffers || []).forEach(function (b) {
+                        var tr = document.createElement("tr");
+                        tr.style.borderTop = "1px solid rgba(128,128,128,.2)";
+                        tr.innerHTML = '<td style="padding:.3em;">' + esc(b.ProgramName) + '</td><td>' + esc(b.ChannelName) + '</td><td>' +
+                            esc(time(b.StartedUtc)) + '</td><td>' + esc(state(b)) + '</td><td></td>';
+                        if (b.Owned) {
+                            var btn = document.createElement("button");
+                            btn.setAttribute("is", "emby-button");
+                            btn.type = "button";
+                            btn.className = "emby-button";
+                            btn.style.padding = ".2em .8em";
+                            btn.textContent = b.Kept ? "Un-keep" : "Keep";
+                            btn.addEventListener("click", function () {
+                                api(b.Kept ? "DELETE" : "POST", "JellyDvrLive/Keep/" + b.Id).then(load);
+                            });
+                            tr.lastChild.appendChild(btn);
+                        }
+                        body.appendChild(tr);
+                    });
+                    page.querySelector("#DlViewers").textContent = (s.Viewers || []).length
+                        ? s.Viewers.map(function (v) { return v.ChannelName + " · " + v.UserName + " (" + v.Client + ")"; }).join("\n")
+                        : "Nobody.";
+                });
+            }
+
+            page.addEventListener("pageshow", function () {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginUniqueId).then(function (config) {
+                    page.querySelector("#DlMode").value = config.Mode || "from-tune-in";
+                    page.querySelector("#DlKeepBuffering").value = config.KeepBufferingMinutes == null ? 10 : config.KeepBufferingMinutes;
+                    page.querySelector("#DlDeleteAfter").value = config.DeleteAfterHours == null ? 4 : config.DeleteAfterHours;
+                    page.querySelector("#DlTagName").textContent = config.BufferTag || "Live buffer";
+                    Dashboard.hideLoadingMsg();
+                });
+                load();
+                timer = setInterval(load, 10000);
+            });
+
+            page.addEventListener("pagehide", function () {
+                if (timer) { clearInterval(timer); timer = null; }
+            });
+
+            page.querySelector("#DvrLiveConfigForm").addEventListener("submit", function (e) {
+                e.preventDefault();
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginUniqueId).then(function (config) {
+                    config.Mode = page.querySelector("#DlMode").value;
+                    var keep = parseInt(page.querySelector("#DlKeepBuffering").value, 10);
+                    var del = parseInt(page.querySelector("#DlDeleteAfter").value, 10);
+                    config.KeepBufferingMinutes = isNaN(keep) ? 10 : keep;
+                    config.DeleteAfterHours = isNaN(del) ? 4 : del;
+                    ApiClient.updatePluginConfiguration(pluginUniqueId, config).then(function (result) {
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                        load();
+                    });
+                });
+                return false;
+            });
+        })();
+    </script>
+</div>
+</body>
+</html>

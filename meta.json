@@ -1,0 +1,16 @@
+{
+  "category": "Live TV",
+  "changelog": "",
+  "description": "SageTV-style live TV buffer: records the programme you're watching from the moment you tune in, so you can rewind past tune-in, switch devices, skip commercials, or keep it as a real recording. Unkept buffers are deleted automatically.",
+  "guid": "cfd76dc2-a07d-4fc9-a2d9-c5d2aaa67215",
+  "name": "JellyDVR Live",
+  "overview": "",
+  "owner": "",
+  "targetAbi": "12.0.0.0",
+  "timestamp": "0001-01-01T00:00:00.0000000Z",
+  "version": "1.0.0.0",
+  "status": "Active",
+  "autoUpdate": false,
+  "imagePath": "icon.png",
+  "assemblies": []
+}
