@@ -45,6 +45,7 @@ The buffer list lives at `<data>/jellydvr-live/buffers.json` so the other JellyD
 - `GET /JellyDvrLive/Channel/{channelId}` — buffers for a channel, oldest first.
 - `POST /JellyDvrLive/Channel/{channelId}/Start` — start buffering now (on-demand mode).
 - `GET /JellyDvrLive/Item/{itemId}` — the buffer an item belongs to, if any.
+- `GET /JellyDvrLive/Programs` — guide programme ids that are only buffers (for a fainter recording mark).
 - `POST` / `DELETE /JellyDvrLive/Keep/{bufferId}` — keep / un-keep.
 - `GET /JellyDvrLive/Status` — everything (admin).
 

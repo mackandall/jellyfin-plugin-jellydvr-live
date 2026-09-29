@@ -6,7 +6,9 @@
  *     normal recording controls can rewind past tune-in, skip commercials, or carry on later
  *     from another device. Pausing itself stays on the live stream.
  *   - "Keep" (bookmark icon): keeps the programme on now as a real recording.
- * While a buffer recording plays, only "Keep" shows.
+ * While a buffer recording plays, only "Keep" shows. In the guide, the recording mark of a
+ * programme that is only being buffered is drawn faint, so a solid red dot always means a real
+ * recording.
  *
  * Loaded from index.html (install-web.sh). Finds what's playing from this browser's own
  * session, and opens the buffer by sending that session a PlayNow command at a position,
@@ -155,7 +157,40 @@
     if (state.itemBuffer) { setKeepButton(state.itemBuffer); }
   }
 
+  // ---- guide: fainter recording mark for programmes that are only a buffer ----------------
+
+  var bufferIds = new Set();
+  var bufferFetchedMs = 0;
+
+  function applyGuideMarks() {
+    document.querySelectorAll('.programCell[data-id]').forEach(function (cell) {
+      var id = cell.getAttribute('data-id').replace(/-/g, '').toLowerCase();
+      cell.querySelectorAll('.timerIcon').forEach(function (icon) {
+        icon.classList.toggle('jdvrBufferIcon', bufferIds.has(id));
+      });
+    });
+  }
+
+  function styleGuide() {
+    if (!api() || !document.querySelector('.programCell .timerIcon')) { return; }
+    if (!document.getElementById('jdvrLiveStyle')) {
+      var style = document.createElement('style');
+      style.id = 'jdvrLiveStyle';
+      style.textContent = '.jdvrBufferIcon { opacity: .35; }';
+      document.head.appendChild(style);
+    }
+    if (Date.now() - bufferFetchedMs > 15000) {
+      bufferFetchedMs = Date.now();
+      getJson('JellyDvrLive/Programs').then(function (res) {
+        bufferIds = new Set(((res && res.ProgramIds) || []).map(function (x) { return x.toLowerCase(); }));
+        applyGuideMarks();
+      }, function () {});
+    }
+    applyGuideMarks();
+  }
+
   function tick() {
+    try { styleGuide(); } catch (e) { log('guide marks failed: ' + e); }
     var video = document.querySelector('video');
     if (!video || !document.querySelector('.videoOsdBottom')) {
       if (state.key || state.itemId) { state = { key: null }; }

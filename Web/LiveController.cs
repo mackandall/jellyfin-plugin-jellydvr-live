@@ -41,6 +41,20 @@ public sealed class LiveController : ControllerBase
         return Channel(channelId);
     }
 
+    /// <summary>
+    /// Guide programmes that are only being recorded as a buffer (not kept, not a real scheduled
+    /// recording), so guides can draw their recording mark fainter.
+    /// </summary>
+    [HttpGet("Programs")]
+    public IActionResult Programs() =>
+        Ok(new
+        {
+            ProgramIds = _manager.Buffers
+                .Where(b => b.Owned && !b.Kept)
+                .Select(b => b.ProgramId.ToString("N"))
+                .Distinct()
+        });
+
     /// <summary>The buffer an item belongs to, if any (so a player can offer Keep).</summary>
     [HttpGet("Item/{itemId}")]
     public IActionResult Item([FromRoute] Guid itemId)
