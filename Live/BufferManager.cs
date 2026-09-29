@@ -127,8 +127,9 @@ public sealed class BufferManager : BackgroundService
             _viewers[key] = new Viewer(channel.Id, channel.Name, e.Session?.UserName ?? string.Empty, e.ClientName ?? string.Empty, now, isNew ? now : old!.TunedInUtc);
             if (isNew)
             {
-                // Tuned in (or changed channel): once they've stayed long enough, buffer without
-                // waiting for the next periodic check. Surfing past a channel starts nothing.
+                // Tuned in (or changed channel): check now (a channel just left may have to give
+                // way), and again once they've stayed long enough to buffer. Surfing starts nothing.
+                _ = TickAfterAsync(TimeSpan.Zero);
                 _ = TickAfterAsync(TimeSpan.FromSeconds(Math.Max(0, Config.StartAfterSeconds) + 1));
             }
         }
@@ -261,6 +262,7 @@ public sealed class BufferManager : BackgroundService
             await EnsureBufferedAsync(channelId, watched[channelId].ChannelName, timers, now, ct).ConfigureAwait(false);
         }
 
+        await GiveWayAsync(cfg, timers, now).ConfigureAwait(false);
         await StopUnwatchedAsync(cfg, now).ConfigureAwait(false);
         await TagAllAsync().ConfigureAwait(false);
         Cleanup(cfg, now);
@@ -275,20 +277,38 @@ public sealed class BufferManager : BackgroundService
             foreach (var b in list)
             {
                 var timer = b.TimerId is null ? null : timers.FirstOrDefault(t => t.Id == b.TimerId);
-                if (b.Path is null && timer is not null)
+                // Jellyfin's schedule is the truth: a timer still New/InProgress means it is (or will
+                // be) recording — including one Jellyfin resumed by itself after a server restart.
+                var scheduled = timer is not null && (timer.Status == RecordingStatus.New || timer.Status == RecordingStatus.InProgress);
+                var activePath = timer is null ? null
+                    : recordings?.GetActiveRecordingPath(timer.ExternalId ?? timer.Id) ?? recordings?.GetActiveRecordingPath(timer.Id);
+                if (activePath is not null)
                 {
-                    b.Path = recordings?.GetActiveRecordingPath(timer.ExternalId ?? timer.Id) ?? recordings?.GetActiveRecordingPath(timer.Id);
-                    if (b.Path is not null && b.StartedUtc > now)
+                    if (b.Path is null)
                     {
-                        b.StartedUtc = now; // a next-programme timer that has just begun
+                        b.Path = activePath;
+                        if (b.StartedUtc > now)
+                        {
+                            b.StartedUtc = now; // a next-programme timer that has just begun
+                        }
                     }
+                    else if (activePath != b.Path && !b.ExtraPaths.Contains(activePath))
+                    {
+                        b.ExtraPaths.Add(activePath);
+                        _logger.LogInformation("Buffer of {Program} on {Channel} continues in {Path}", b.ProgramName, b.ChannelName, activePath);
+                    }
+                }
+
+                if (b.EndedUtc is not null && scheduled)
+                {
+                    b.EndedUtc = null;
+                    _logger.LogInformation("Jellyfin resumed the buffer of {Program} on {Channel}; managing it again", b.ProgramName, b.ChannelName);
                 }
 
                 if (b.IsRecording)
                 {
-                    var active = b.Path is not null && recordings?.GetActiveRecordingInfo(b.Path) is not null;
-                    var pending = timer is not null && timer.Status == RecordingStatus.New;
-                    if (!active && !pending && now - b.StartedUtc > TimeSpan.FromMinutes(1))
+                    var active = activePath is not null || (b.Path is not null && recordings?.GetActiveRecordingInfo(b.Path) is not null);
+                    if (!active && !scheduled && now - b.StartedUtc > TimeSpan.FromMinutes(1))
                     {
                         b.EndedUtc = now;
                     }
@@ -415,6 +435,84 @@ public sealed class BufferManager : BackgroundService
             buffer.Owned ? string.Empty : " (already being recorded; using that recording)");
     }
 
+    /// <summary>
+    /// Give way: when every tuner input is in use (or will be, for a scheduled recording about to
+    /// start), stop buffers on channels nobody is watching right away, least recently watched
+    /// first, so one input stays free for the next channel someone tunes. Never stops kept buffers,
+    /// real recordings, or anything someone is watching.
+    /// </summary>
+    private async Task GiveWayAsync(PluginConfiguration cfg, IReadOnlyList<TimerInfoDto> timers, DateTime now)
+    {
+        var limit = cfg.TunerInputs > 0 ? cfg.TunerInputs : JellyfinTunerCount();
+        if (limit <= 0)
+        {
+            return; // unlimited / unknown: nothing to give way for
+        }
+
+        var buffers = _store.Snapshot();
+        var bufferTimerIds = buffers.Select(b => b.TimerId).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        var watchedChannels = _viewers.Values.Select(v => v.ChannelId).ToHashSet();
+        var playingItems = _sessionManager.Sessions.Select(s => s.NowPlayingItem?.Id).OfType<Guid>().ToHashSet();
+
+        // Channels holding an input now: watched channels, recording buffers, real recordings.
+        // Viewers and a buffer on the same channel share one stream.
+        var inUse = new HashSet<Guid>(watchedChannels);
+        foreach (var t in timers.Where(t => t.Status == RecordingStatus.InProgress))
+        {
+            inUse.Add(t.ChannelId);
+        }
+
+        var dueSoon = timers.Count(t => t.Status == RecordingStatus.New && !bufferTimerIds.Contains(t.Id)
+            && t.StartDate.AddSeconds(-t.PrePaddingSeconds) <= now.AddSeconds(90) && !inUse.Contains(t.ChannelId));
+        var spare = limit - inUse.Count - dueSoon;
+        if (spare >= 1)
+        {
+            return;
+        }
+
+        var candidates = buffers
+            .Where(b => b.IsRecording && b.Owned && !b.Kept && b.TimerId is not null
+                && !watchedChannels.Contains(b.ChannelId)
+                && !(b.ItemId is { } id && playingItems.Contains(id))
+                && timers.Any(t => t.Id == b.TimerId && t.Status == RecordingStatus.InProgress))
+            .OrderBy(b => b.LastViewerUtc);
+        foreach (var b in candidates)
+        {
+            if (spare >= 1)
+            {
+                break;
+            }
+
+            try
+            {
+                await LiveTv.CancelTimer(b.TimerId!).ConfigureAwait(false);
+                _logger.LogInformation("Stopped buffering {Program} on {Channel} to free a tuner input ({InUse} of {Limit} in use)", b.ProgramName, b.ChannelName, inUse.Count, limit);
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or KeyNotFoundException)
+            {
+                _logger.LogDebug(ex, "Timer {Id} already gone", b.TimerId);
+            }
+
+            _store.Update(list =>
+            {
+                var s = list.FirstOrDefault(x => x.Id == b.Id);
+                if (s is not null)
+                {
+                    s.EndedUtc = now;
+                }
+            });
+            inUse.Remove(b.ChannelId);
+            spare++;
+        }
+    }
+
+    // Jellyfin's configured tuner count across tuners; 0 if any tuner is unlimited.
+    private int JellyfinTunerCount()
+    {
+        var hosts = _config.GetConfiguration<LiveTvOptions>("livetv").TunerHosts ?? Array.Empty<TunerHostInfo>();
+        return hosts.Length == 0 || hosts.Any(h => h.TunerCount <= 0) ? 0 : hosts.Sum(h => h.TunerCount);
+    }
+
     // Stop recording buffers on channels nobody has watched for a while (unless kept).
     private async Task StopUnwatchedAsync(PluginConfiguration cfg, DateTime now)
     {
@@ -449,7 +547,7 @@ public sealed class BufferManager : BackgroundService
 
     private async Task TagAllAsync()
     {
-        foreach (var b in _store.Snapshot().Where(b => b.Owned && b.ItemId is not null))
+        foreach (var b in _store.Snapshot().Where(b => b.Owned && (b.ItemId is not null || b.ExtraPaths.Count > 0)))
         {
             await ApplyTagAsync(b).ConfigureAwait(false);
         }
@@ -459,22 +557,29 @@ public sealed class BufferManager : BackgroundService
     // refresh can rewrite an item's tags.
     private async Task ApplyTagAsync(LiveBuffer b)
     {
-        if (!b.Owned || b.ItemId is not { } id || _libraryManager.GetItemById(id) is not BaseItem item)
+        if (!b.Owned)
         {
             return;
         }
 
         var tag = Config.BufferTag;
-        var has = item.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase);
-        if (has == !b.Kept)
+        var items = b.AllPaths.Select(p => _libraryManager.FindByPath(p, false))
+            .Append(b.ItemId is { } id ? _libraryManager.GetItemById(id) : null)
+            .OfType<BaseItem>()
+            .DistinctBy(i => i.Id);
+        foreach (var item in items)
         {
-            return;
-        }
+            var has = item.Tags.Contains(tag, StringComparer.OrdinalIgnoreCase);
+            if (has == !b.Kept)
+            {
+                continue;
+            }
 
-        item.Tags = b.Kept
-            ? item.Tags.Where(t => !string.Equals(t, tag, StringComparison.OrdinalIgnoreCase)).ToArray()
-            : item.Tags.Append(tag).ToArray();
-        await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, _stopping).ConfigureAwait(false);
+            item.Tags = b.Kept
+                ? item.Tags.Where(t => !string.Equals(t, tag, StringComparison.OrdinalIgnoreCase)).ToArray()
+                : item.Tags.Append(tag).ToArray();
+            await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, _stopping).ConfigureAwait(false);
+        }
     }
 
     // Delete buffers nobody kept once they've gone unwatched long enough; forget the rest.
@@ -483,7 +588,7 @@ public sealed class BufferManager : BackgroundService
         var expiry = TimeSpan.FromHours(Math.Max(0, cfg.DeleteAfterHours));
         foreach (var b in _store.Snapshot())
         {
-            var gone = b.Path is not null && !File.Exists(b.Path) && !b.IsRecording;
+            var gone = b.Path is not null && !b.AllPaths.Any(File.Exists) && !b.IsRecording;
             var expired = !b.IsRecording && now - b.LastViewerUtc > expiry;
             var keptAndDone = b.Kept && !b.IsRecording;
             if (!gone && !expired && !keptAndDone)
@@ -505,34 +610,38 @@ public sealed class BufferManager : BackgroundService
 
     private bool DeleteBuffer(LiveBuffer b)
     {
-        var path = b.Path!;
         var roots = RecordingRoots();
-        if (!roots.Any(r => path.StartsWith(r + "/", StringComparison.Ordinal)))
-        {
-            _logger.LogWarning("Not deleting buffer {Path}: not under the recording folders", path);
-            return true; // forget it rather than retry forever
-        }
-
+        string? RootOf(string path) => roots.FirstOrDefault(r => path.StartsWith(r + "/", StringComparison.Ordinal));
         try
         {
-            var files = RecordingFiles(path);
-            if (b.ItemId is { } id && _libraryManager.GetItemById(id) is BaseItem item)
+            foreach (var path in b.AllPaths.ToList())
             {
-                _libraryManager.DeleteItem(item, new DeleteOptions { DeleteFileLocation = true }, true);
+                if (RootOf(path) is not { } root)
+                {
+                    _logger.LogWarning("Not deleting buffer file {Path}: not under the recording folders", path);
+                    continue;
+                }
+
+                var files = RecordingFiles(path);
+                if (_libraryManager.FindByPath(path, false) is BaseItem item)
+                {
+                    _libraryManager.DeleteItem(item, new DeleteOptions { DeleteFileLocation = true }, true);
+                }
+
+                foreach (var f in files.Where(File.Exists))
+                {
+                    File.Delete(f);
+                }
+
+                TidyEmptiedFolders(Path.GetDirectoryName(path)!, root);
+                _logger.LogInformation("Deleted unkept buffer {Program} on {Channel} ({Path})", b.ProgramName, b.ChannelName, path);
             }
 
-            foreach (var f in files.Where(File.Exists))
-            {
-                File.Delete(f);
-            }
-
-            TidyEmptiedFolders(Path.GetDirectoryName(path)!, roots.First(r => path.StartsWith(r + "/", StringComparison.Ordinal)));
-            _logger.LogInformation("Deleted unkept buffer {Program} on {Channel} ({Path})", b.ProgramName, b.ChannelName, path);
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            _logger.LogWarning(ex, "Could not delete buffer {Path}; will retry", path);
+            _logger.LogWarning(ex, "Could not delete buffer {Program}; will retry", b.ProgramName);
             return false;
         }
     }

@@ -52,6 +52,12 @@
                     </div>
 
                     <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="DlTunerInputs">Tuner inputs that can stream at once (0 = use Jellyfin's tuner count)</label>
+                        <input id="DlTunerInputs" type="number" min="0" max="64" is="emby-input" />
+                        <div class="fieldDescription">When they're all in use, buffers on channels nobody is watching stop at once so a new channel or a scheduled recording can open. Kept buffers and anything being watched are never stopped.</div>
+                    </div>
+
+                    <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="DlDeleteAfter">Delete unkept buffers this long after they were last watched (hours)</label>
                         <input id="DlDeleteAfter" type="number" min="0" max="720" is="emby-input" />
                     </div>
@@ -135,6 +141,7 @@
                 ApiClient.getPluginConfiguration(pluginUniqueId).then(function (config) {
                     page.querySelector("#DlMode").value = config.Mode || "from-tune-in";
                     page.querySelector("#DlKeepBuffering").value = config.KeepBufferingMinutes == null ? 10 : config.KeepBufferingMinutes;
+                    page.querySelector("#DlTunerInputs").value = config.TunerInputs == null ? 0 : config.TunerInputs;
                     page.querySelector("#DlStartAfter").value = config.StartAfterSeconds == null ? 30 : config.StartAfterSeconds;
                     page.querySelector("#DlStopAfterLeaving").value = config.StopAfterLeavingMinutes == null ? 1 : config.StopAfterLeavingMinutes;
                     page.querySelector("#DlDeleteAfter").value = config.DeleteAfterHours == null ? 4 : config.DeleteAfterHours;
@@ -160,6 +167,8 @@
                     var start = parseInt(page.querySelector("#DlStartAfter").value, 10);
                     var leave = parseInt(page.querySelector("#DlStopAfterLeaving").value, 10);
                     config.StartAfterSeconds = isNaN(start) ? 30 : start;
+                    var inputs = parseInt(page.querySelector("#DlTunerInputs").value, 10);
+                    config.TunerInputs = isNaN(inputs) ? 0 : inputs;
                     config.StopAfterLeavingMinutes = isNaN(leave) ? 1 : leave;
                     config.DeleteAfterHours = isNaN(del) ? 4 : del;
                     ApiClient.updatePluginConfiguration(pluginUniqueId, config).then(function (result) {

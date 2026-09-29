@@ -26,6 +26,13 @@ public class PluginConfiguration : BasePluginConfiguration
     /// </summary>
     public int KeepBufferingMinutes { get; set; } = 10;
 
+    /// <summary>
+    /// How many tuner inputs can actually stream at once (0 = use Jellyfin's tuner count). When
+    /// they are all in use, buffers on channels nobody is watching stop at once, so a new channel
+    /// or a scheduled recording can open.
+    /// </summary>
+    public int TunerInputs { get; set; }
+
     /// <summary>Delete a buffer nobody kept this long after its last viewer left (hours).</summary>
     public int DeleteAfterHours { get; set; } = 4;
 

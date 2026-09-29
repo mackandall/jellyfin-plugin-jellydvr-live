@@ -19,6 +19,9 @@ Guide Cleaner.
   buffer carries on across the boundary.
 - If the programme is already being recorded by a scheduled timer, that recording is used as the buffer and
   never touched.
+- Jellyfin's own schedule decides whether a buffer is recording: after a server restart Jellyfin resumes
+  in-progress recordings into new files ("… - 1.ts"); the plugin picks those up, stops them by the usual rules,
+  and tags and deletes every file a buffer produced.
 - Buffering starts only once someone has stayed on a channel for a while (default 30 seconds), so channel
   surfing doesn't tie up tuners.
 - Buffering stops a minute after the last viewer stops or changes channel, or 10 minutes after their app goes
@@ -38,6 +41,9 @@ The buffer list lives at `<data>/jellydvr-live/buffers.json` so the other JellyD
 - **Start buffering after watching a channel for** — seconds (default 30).
 - **Stop buffering after the viewer stops or changes channel** — minutes (default 1).
 - **Keep buffering when a viewer's app goes silent** — minutes (default 10).
+- **Tuner inputs that can stream at once** — 0 (default) uses Jellyfin's tuner count. When all are in use (or a
+  scheduled recording is about to start), buffers on channels nobody is watching stop at once, least recently
+  watched first, so the next channel or recording can open.
 - **Delete unkept buffers** — hours after they were last watched (default 4).
 
 ## API (for the web and TV client add-ons)

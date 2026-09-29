@@ -27,6 +27,15 @@ public sealed class LiveBuffer
     /// <summary>The recording file, once the recorder has started.</summary>
     public string? Path { get; set; }
 
+    /// <summary>
+    /// Further files for the same buffer: after a server restart Jellyfin resumes a recording that
+    /// was in progress into a new file ("… - 1.ts"). Tagged, ignored and deleted like <see cref="Path"/>.
+    /// </summary>
+    public List<string> ExtraPaths { get; set; } = new();
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IEnumerable<string> AllPaths => (Path is null ? Enumerable.Empty<string>() : new[] { Path }).Concat(ExtraPaths ?? new());
+
     /// <summary>The library item, once Jellyfin has added it.</summary>
     public Guid? ItemId { get; set; }
 
