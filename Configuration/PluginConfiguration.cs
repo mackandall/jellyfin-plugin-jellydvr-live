@@ -14,7 +14,16 @@ public class PluginConfiguration : BasePluginConfiguration
     /// </summary>
     public string Mode { get; set; } = ModeFromTuneIn;
 
-    /// <summary>Keep buffering a channel this long after its last viewer leaves (minutes), in case they come back.</summary>
+    /// <summary>Start buffering only once a viewer has stayed on a channel this long (seconds), so surfing starts nothing.</summary>
+    public int StartAfterSeconds { get; set; } = 30;
+
+    /// <summary>Stop buffering this long after the last viewer stopped or changed channel (minutes).</summary>
+    public int StopAfterLeavingMinutes { get; set; } = 1;
+
+    /// <summary>
+    /// Keep buffering this long after the last viewer's app went silent without stopping (minutes),
+    /// in case it comes back (network drop, app crash, TV switched off).
+    /// </summary>
     public int KeepBufferingMinutes { get; set; } = 10;
 
     /// <summary>Delete a buffer nobody kept this long after its last viewer left (hours).</summary>

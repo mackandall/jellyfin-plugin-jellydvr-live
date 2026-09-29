@@ -19,7 +19,10 @@ Guide Cleaner.
   buffer carries on across the boundary.
 - If the programme is already being recorded by a scheduled timer, that recording is used as the buffer and
   never touched.
-- A while after the last viewer leaves (default 10 minutes), buffering that channel stops.
+- Buffering starts only once someone has stayed on a channel for a while (default 30 seconds), so channel
+  surfing doesn't tie up tuners.
+- Buffering stops a minute after the last viewer stops or changes channel, or 10 minutes after their app goes
+  silent without saying so (both settings).
 - Buffer recordings are tagged `Live buffer` until kept. Episode History ignores them and JellyDVR Space
   deletes them first when space runs low.
 - **Keep** turns a buffer into an ordinary recording: untagged, recorded to the end of the programme, never
@@ -32,7 +35,9 @@ The buffer list lives at `<data>/jellydvr-live/buffers.json` so the other JellyD
 ## Settings (Dashboard → Plugins → JellyDVR Live)
 
 - **Buffering** — *From tune-in* (default), *On demand* (only when a viewer asks), or *Off*.
-- **Keep buffering after the last viewer leaves** — minutes (default 10).
+- **Start buffering after watching a channel for** — seconds (default 30).
+- **Stop buffering after the viewer stops or changes channel** — minutes (default 1).
+- **Keep buffering when a viewer's app goes silent** — minutes (default 10).
 - **Delete unkept buffers** — hours after they were last watched (default 4).
 
 ## API (for the web and TV client add-ons)

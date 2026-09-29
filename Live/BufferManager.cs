@@ -44,6 +44,10 @@ public sealed class BufferManager : BackgroundService
     private readonly ConcurrentDictionary<string, Viewer> _viewers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Guid, DateTime> _requested = new();
     private readonly ConcurrentDictionary<Guid, DateTime> _failedUntil = new();
+
+    // How the last viewer left each channel: true = stopped or changed channel (short grace),
+    // false = went silent, e.g. an app closed without saying so (long grace).
+    private readonly ConcurrentDictionary<Guid, bool> _leftCleanly = new();
     private CancellationToken _stopping;
 
     public BufferManager(
@@ -109,19 +113,29 @@ public sealed class BufferManager : BackgroundService
             return;
         }
 
+        var now = DateTime.UtcNow;
+        _viewers.TryGetValue(key, out var old);
         if (e.Item is LiveTvChannel channel)
         {
-            var isNew = !_viewers.TryGetValue(key, out var old) || old.ChannelId != channel.Id;
-            _viewers[key] = new Viewer(channel.Id, channel.Name, e.Session?.UserName ?? string.Empty, e.ClientName ?? string.Empty, DateTime.UtcNow);
+            var isNew = old is null || old.ChannelId != channel.Id;
+            if (old is not null && isNew)
+            {
+                _leftCleanly[old.ChannelId] = true; // changed channel
+            }
+
+            _leftCleanly.TryRemove(channel.Id, out _);
+            _viewers[key] = new Viewer(channel.Id, channel.Name, e.Session?.UserName ?? string.Empty, e.ClientName ?? string.Empty, now, isNew ? now : old!.TunedInUtc);
             if (isNew)
             {
-                // Tuned in (or changed channel): start the buffer now rather than at the next tick.
-                _ = TickSafeAsync();
+                // Tuned in (or changed channel): once they've stayed long enough, buffer without
+                // waiting for the next periodic check. Surfing past a channel starts nothing.
+                _ = TickAfterAsync(TimeSpan.FromSeconds(Math.Max(0, Config.StartAfterSeconds) + 1));
             }
         }
-        else
+        else if (old is not null)
         {
             // Playing something else now (e.g. the buffer itself): no longer on a live channel.
+            _leftCleanly[old.ChannelId] = true;
             _viewers.TryRemove(key, out _);
         }
     }
@@ -129,10 +143,25 @@ public sealed class BufferManager : BackgroundService
     private void OnPlaybackStopped(object? sender, PlaybackStopEventArgs e)
     {
         var key = ViewerKey(e.Session?.Id, e.DeviceId, e.PlaySessionId);
-        if (key is not null && e.Item is LiveTvChannel)
+        if (key is not null && e.Item is LiveTvChannel channel && _viewers.TryRemove(key, out _))
         {
-            _viewers.TryRemove(key, out _);
+            _leftCleanly[channel.Id] = true;
+            _ = TickAfterAsync(TimeSpan.Zero);
         }
+    }
+
+    private async Task TickAfterAsync(TimeSpan delay)
+    {
+        try
+        {
+            await Task.Delay(delay, _stopping).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        await TickSafeAsync().ConfigureAwait(false);
     }
 
     private static string? ViewerKey(string? sessionId, string? deviceId, string? playSessionId) =>
@@ -200,16 +229,21 @@ public sealed class BufferManager : BackgroundService
         // Viewers that stopped reporting (app closed without saying so) no longer count.
         foreach (var (key, v) in _viewers)
         {
-            if (now - v.LastSeenUtc > ViewerTimeout)
+            if (now - v.LastSeenUtc > ViewerTimeout && _viewers.TryRemove(key, out _))
             {
-                _viewers.TryRemove(key, out _);
+                _leftCleanly[v.ChannelId] = false; // vanished without a stop
             }
         }
 
         var watched = _viewers.Values.GroupBy(v => v.ChannelId).ToDictionary(g => g.Key, g => g.First());
+        var settled = TimeSpan.FromSeconds(Math.Max(0, cfg.StartAfterSeconds));
         var wanted = cfg.Mode switch
         {
-            PluginConfiguration.ModeFromTuneIn => watched.Keys.ToHashSet(),
+            // Only channels someone has stayed on long enough: surfing past one starts nothing.
+            PluginConfiguration.ModeFromTuneIn => _viewers.Values
+                .Where(v => now - v.TunedInUtc >= settled)
+                .Select(v => v.ChannelId)
+                .ToHashSet(),
             PluginConfiguration.ModeOnDemand => _requested.Keys.Where(watched.ContainsKey).ToHashSet(),
             _ => new HashSet<Guid>()
         };
@@ -384,14 +418,18 @@ public sealed class BufferManager : BackgroundService
     // Stop recording buffers on channels nobody has watched for a while (unless kept).
     private async Task StopUnwatchedAsync(PluginConfiguration cfg, DateTime now)
     {
-        var grace = TimeSpan.FromMinutes(Math.Max(0, cfg.KeepBufferingMinutes));
+        // Short wait after a viewer stopped or changed channel; the long one only when their app
+        // went silent (it may come back, and nothing told us it left).
+        var longGrace = TimeSpan.FromMinutes(Math.Max(0, cfg.KeepBufferingMinutes));
+        var shortGrace = TimeSpan.FromMinutes(Math.Max(0, cfg.StopAfterLeavingMinutes));
+        TimeSpan Grace(LiveBuffer b) => _leftCleanly.TryGetValue(b.ChannelId, out var clean) && clean ? shortGrace : longGrace;
         foreach (var b in _store.Snapshot().Where(b => b.IsRecording && b.Owned && !b.Kept && b.TimerId is not null
-            && now - b.LastViewerUtc > grace))
+            && now - b.LastViewerUtc > Grace(b)))
         {
             try
             {
                 await LiveTv.CancelTimer(b.TimerId!).ConfigureAwait(false);
-                _logger.LogInformation("Stopped buffering {Program} on {Channel}: no viewers for {Minutes} min", b.ProgramName, b.ChannelName, cfg.KeepBufferingMinutes);
+                _logger.LogInformation("Stopped buffering {Program} on {Channel}: no viewers for {Minutes} min", b.ProgramName, b.ChannelName, Grace(b).TotalMinutes);
             }
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or KeyNotFoundException)
             {
@@ -564,5 +602,5 @@ public sealed class BufferManager : BackgroundService
         }
     }
 
-    public sealed record Viewer(Guid ChannelId, string ChannelName, string UserName, string Client, DateTime LastSeenUtc);
+    public sealed record Viewer(Guid ChannelId, string ChannelName, string UserName, string Client, DateTime LastSeenUtc, DateTime TunedInUtc);
 }
