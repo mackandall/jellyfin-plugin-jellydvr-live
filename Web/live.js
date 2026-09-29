@@ -93,18 +93,31 @@
     return state.liveStartMs + video.currentTime * 1000;
   }
 
+  // When a buffer's recording ends: when it stopped, or (still recording) not yet.
+  function bufferEndMs(b) {
+    if (b.EndedUtc) { return Date.parse(b.EndedUtc); }
+    return b.Recording ? Infinity : Date.parse(b.ProgramEndUtc);
+  }
+
+  // The buffer that recorded the moment ms — never an older, finished buffer of this channel
+  // (e.g. from an earlier visit, before this visit's buffer has started).
   function bufferAt(ms) {
     var covering = state.buffers.filter(function (b) {
-      return b.ItemId && Date.parse(b.StartedUtc) <= ms + 1000;
+      return b.ItemId && Date.parse(b.StartedUtc) <= ms + 1000 && ms < bufferEndMs(b);
     });
     return covering.length ? covering[covering.length - 1] : null;
   }
 
   function currentBuffer() {
     var now = Date.now();
-    var onNow = state.buffers.filter(function (b) { return Date.parse(b.StartedUtc) <= now; });
+    var onNow = state.buffers.filter(function (b) { return Date.parse(b.StartedUtc) <= now && now < bufferEndMs(b); });
     return onNow.length ? onNow[onNow.length - 1] : null;
   }
+
+  // jellyfin-web ignores the start position for a recording still in progress, so after opening a
+  // buffer the script seeks there itself once it plays.
+  var pendingSeek = null;
+  function normId(id) { return String(id || '').replace(/-/g, '').toLowerCase(); }
 
   function openBuffer(session, video) {
     var ms = wallTimeMs(video);
@@ -112,6 +125,7 @@
     if (!b) { return; }
     var positionMs = Math.max(0, ms - Date.parse(b.StartedUtc));
     log('opening buffer ' + b.ItemId + ' at ' + Math.round(positionMs / 1000) + ' s');
+    pendingSeek = { itemId: normId(b.ItemId), seconds: positionMs / 1000, until: Date.now() + 60000 };
     post('Sessions/' + session.Id + '/Playing?playCommand=PlayNow&itemIds=' + b.ItemId +
       '&startPositionTicks=' + Math.round(positionMs * TICKS_PER_MS));
   }
@@ -142,9 +156,18 @@
 
   // ---- a recording (maybe a buffer) --------------------------------------------------------
 
-  function updateItem(itemId) {
+  function updateItem(itemId, video) {
     var old = document.querySelector('.videoOsdBottom .jdvrLiveBuffer');
     if (old) { old.remove(); }
+    if (pendingSeek && Date.now() > pendingSeek.until) { pendingSeek = null; }
+    if (pendingSeek && pendingSeek.itemId === normId(itemId) && video.readyState >= 1) {
+      var target = Math.min(pendingSeek.seconds, isFinite(video.duration) ? Math.max(0, video.duration - 5) : pendingSeek.seconds);
+      if (Math.abs(video.currentTime - target) > 3) {
+        log('seeking buffer to ' + Math.round(target) + ' s');
+        video.currentTime = target;
+      }
+      pendingSeek = null;
+    }
     if (state.itemId !== itemId) {
       state = { key: null, itemId: itemId, itemBuffer: undefined };
       getJson('JellyDvrLive/Item/' + itemId).then(function (b) {
@@ -202,7 +225,7 @@
       if (item.Type === 'TvChannel') {
         updateLive(session, video);
       } else {
-        updateItem(item.Id);
+        updateItem(item.Id, video);
       }
     });
   }
