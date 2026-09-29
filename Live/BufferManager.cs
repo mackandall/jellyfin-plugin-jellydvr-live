@@ -373,7 +373,9 @@ public sealed class BufferManager : BackgroundService
 
     private async Task EnsureProgrammeAsync(Guid channelId, string channelName, LiveTvProgram programme, IReadOnlyList<TimerInfoDto> timers, CancellationToken ct)
     {
-        if (_store.Snapshot().Any(b => b.ProgramId == programme.Id && b.ChannelId == channelId))
+        // Already being recorded (by a buffer still running, or kept). A buffer for this programme
+        // that has ended — the viewer left and came back — gets a fresh one for this visit.
+        if (_store.Snapshot().Any(b => b.ProgramId == programme.Id && b.ChannelId == channelId && (b.IsRecording || b.Kept)))
         {
             return;
         }
