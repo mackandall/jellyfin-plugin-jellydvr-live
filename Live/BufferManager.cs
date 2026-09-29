@@ -274,8 +274,21 @@ public sealed class BufferManager : BackgroundService
         var recordings = Recordings;
         _store.Update(list =>
         {
+            // Two buffers holding one timer (a return visit to the same programme): only the newest keeps it.
+            foreach (var group in list.Where(x => x.TimerId is not null).GroupBy(x => x.TimerId).Where(g => g.Count() > 1))
+            {
+                foreach (var older in group.OrderByDescending(x => x.StartedUtc).Skip(1))
+                {
+                    older.TimerId = null;
+                }
+            }
+
+            var mainPaths = list.Select(x => x.Path).OfType<string>().ToHashSet(StringComparer.Ordinal);
             foreach (var b in list)
             {
+                // A file that is another buffer's own recording is never an extra file of this one.
+                b.ExtraPaths.RemoveAll(p => p != b.Path && mainPaths.Contains(p));
+
                 var timer = b.TimerId is null ? null : timers.FirstOrDefault(t => t.Id == b.TimerId);
                 // Jellyfin's schedule is the truth: a timer still New/InProgress means it is (or will
                 // be) recording — including one Jellyfin resumed by itself after a server restart.
@@ -292,7 +305,7 @@ public sealed class BufferManager : BackgroundService
                             b.StartedUtc = now; // a next-programme timer that has just begun
                         }
                     }
-                    else if (activePath != b.Path && !b.ExtraPaths.Contains(activePath))
+                    else if (activePath != b.Path && !b.ExtraPaths.Contains(activePath) && !mainPaths.Contains(activePath))
                     {
                         b.ExtraPaths.Add(activePath);
                         _logger.LogInformation("Buffer of {Program} on {Channel} continues in {Path}", b.ProgramName, b.ChannelName, activePath);
@@ -429,7 +442,18 @@ public sealed class BufferManager : BackgroundService
             buffer.TimerId = created?.Id;
         }
 
-        _store.Update(list => list.Add(buffer));
+        _store.Update(list =>
+        {
+            // Jellyfin gives a programme's one-off timer the same id every time, so a buffer from
+            // an earlier visit would think this new recording is its own resumed one. Only the
+            // newest buffer owns the timer.
+            foreach (var older in list.Where(x => x.TimerId is not null && x.TimerId == buffer.TimerId))
+            {
+                older.TimerId = null;
+            }
+
+            list.Add(buffer);
+        });
         _logger.LogInformation(
             "Buffering {Program} on {Channel}{Note}",
             buffer.ProgramName,
