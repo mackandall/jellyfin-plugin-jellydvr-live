@@ -237,6 +237,7 @@ public sealed class BufferManager : BackgroundService
         }
 
         var watched = _viewers.Values.GroupBy(v => v.ChannelId).ToDictionary(g => g.Key, g => g.First());
+        var names = watched.ToDictionary(x => x.Key, x => x.Value.ChannelName);
         var settled = TimeSpan.FromSeconds(Math.Max(0, cfg.StartAfterSeconds));
         var wanted = cfg.Mode switch
         {
@@ -248,6 +249,17 @@ public sealed class BufferManager : BackgroundService
             PluginConfiguration.ModeOnDemand => _requested.Keys.Where(watched.ContainsKey).ToHashSet(),
             _ => new HashSet<Guid>()
         };
+        // Someone in a channel's buffer (paused or rewound) is still using that channel: while a
+        // buffer is recording there, keep it going and hand over to the next programme as usual.
+        var inBuffer = BufferViewedChannels();
+        foreach (var b in _store.Snapshot().Where(b => b.IsRecording && b.Owned && inBuffer.Contains(b.ChannelId)))
+        {
+            if (wanted.Add(b.ChannelId))
+            {
+                names[b.ChannelId] = b.ChannelName;
+            }
+        }
+
         foreach (var id in _requested.Keys.Where(id => !watched.ContainsKey(id)).ToList())
         {
             _requested.TryRemove(id, out _); // request lapses once nobody watches
@@ -255,21 +267,21 @@ public sealed class BufferManager : BackgroundService
 
         var timers = (await LiveTv.GetTimers(new TimerQuery(), ct).ConfigureAwait(false)).Items;
 
-        RefreshStates(timers, watched, now);
+        RefreshStates(timers, watched, inBuffer, now);
 
         foreach (var channelId in wanted)
         {
-            await EnsureBufferedAsync(channelId, watched[channelId].ChannelName, timers, now, ct).ConfigureAwait(false);
+            await EnsureBufferedAsync(channelId, names[channelId], timers, now, ct).ConfigureAwait(false);
         }
 
-        await GiveWayAsync(cfg, timers, now).ConfigureAwait(false);
+        await GiveWayAsync(cfg, timers, inBuffer, now).ConfigureAwait(false);
         await StopUnwatchedAsync(cfg, now).ConfigureAwait(false);
         await TagAllAsync().ConfigureAwait(false);
         Cleanup(cfg, now);
     }
 
     // Recording state, file path and library item for each buffer; last-viewer times.
-    private void RefreshStates(IReadOnlyList<TimerInfoDto> timers, Dictionary<Guid, Viewer> watched, DateTime now)
+    private void RefreshStates(IReadOnlyList<TimerInfoDto> timers, Dictionary<Guid, Viewer> watched, HashSet<Guid> inBuffer, DateTime now)
     {
         var recordings = Recordings;
         _store.Update(list =>
@@ -342,6 +354,10 @@ public sealed class BufferManager : BackgroundService
                 if (b.ItemId is { } itemId && _sessionManager.Sessions.Any(s => s.NowPlayingItem?.Id == itemId))
                 {
                     b.LastViewerUtc = now; // someone is watching the buffer itself
+                }
+                else if (b.IsRecording && inBuffer.Contains(b.ChannelId))
+                {
+                    b.LastViewerUtc = now; // someone is behind, in an earlier buffer of this channel
                 }
             }
         });
@@ -467,7 +483,7 @@ public sealed class BufferManager : BackgroundService
     /// first, so one input stays free for the next channel someone tunes. Never stops kept buffers,
     /// real recordings, or anything someone is watching.
     /// </summary>
-    private async Task GiveWayAsync(PluginConfiguration cfg, IReadOnlyList<TimerInfoDto> timers, DateTime now)
+    private async Task GiveWayAsync(PluginConfiguration cfg, IReadOnlyList<TimerInfoDto> timers, HashSet<Guid> inBuffer, DateTime now)
     {
         var limit = cfg.TunerInputs > 0 ? cfg.TunerInputs : JellyfinTunerCount();
         if (limit <= 0)
@@ -499,6 +515,7 @@ public sealed class BufferManager : BackgroundService
         var candidates = buffers
             .Where(b => b.IsRecording && b.Owned && !b.Kept && b.TimerId is not null
                 && !watchedChannels.Contains(b.ChannelId)
+                && !inBuffer.Contains(b.ChannelId)
                 && !(b.ItemId is { } id && playingItems.Contains(id))
                 && timers.Any(t => t.Id == b.TimerId && t.Status == RecordingStatus.InProgress))
             .OrderBy(b => b.LastViewerUtc);
@@ -537,6 +554,75 @@ public sealed class BufferManager : BackgroundService
     {
         var hosts = _config.GetConfiguration<LiveTvOptions>("livetv").TunerHosts ?? Array.Empty<TunerHostInfo>();
         return hosts.Length == 0 || hosts.Any(h => h.TunerCount <= 0) ? 0 : hosts.Sum(h => h.TunerCount);
+    }
+
+    // Channels with someone playing one of their buffers.
+    private HashSet<Guid> BufferViewedChannels(IEnumerable<SessionInfo>? sessions = null)
+    {
+        var playing = (sessions ?? _sessionManager.Sessions).Select(s => s.NowPlayingItem?.Id).OfType<Guid>().ToHashSet();
+        return _store.Snapshot().Where(b => b.ItemId is { } id && playing.Contains(id)).Select(b => b.ChannelId).ToHashSet();
+    }
+
+    /// <summary>
+    /// The viewer pressed Stop: they're done with this channel, so free its tuner input now instead
+    /// of after the grace. Leaves kept buffers, real scheduled recordings, and channels someone else
+    /// is still watching (live or in a buffer). Returns how many buffers were stopped.
+    /// </summary>
+    public async Task<int> StopChannelAsync(Guid channelId, string? callerDeviceId)
+    {
+        await _tickLock.WaitAsync(_stopping).ConfigureAwait(false);
+        try
+        {
+            var mine = _sessionManager.Sessions
+                .Where(s => !string.IsNullOrEmpty(callerDeviceId) && string.Equals(s.DeviceId, callerDeviceId, StringComparison.Ordinal))
+                .ToList();
+            foreach (var s in mine)
+            {
+                if (_viewers.TryRemove(s.Id, out _))
+                {
+                    _leftCleanly[channelId] = true;
+                }
+            }
+
+            var others = _sessionManager.Sessions.Where(s => !mine.Contains(s)).ToList();
+            if (_viewers.Values.Any(v => v.ChannelId == channelId) || BufferViewedChannels(others).Contains(channelId))
+            {
+                _logger.LogInformation("Stop on channel {Channel}: someone else is still watching; buffer left running", channelId);
+                return 0;
+            }
+
+            var stopped = 0;
+            var now = DateTime.UtcNow;
+            foreach (var b in _store.Snapshot().Where(b => b.ChannelId == channelId && b.IsRecording && b.Owned && !b.Kept && b.TimerId is not null))
+            {
+                try
+                {
+                    await LiveTv.CancelTimer(b.TimerId!).ConfigureAwait(false);
+                    _logger.LogInformation("Stopped buffering {Program} on {Channel}: the viewer pressed Stop", b.ProgramName, b.ChannelName);
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or KeyNotFoundException)
+                {
+                    _logger.LogDebug(ex, "Timer {Id} already gone", b.TimerId);
+                }
+
+                _store.Update(list =>
+                {
+                    var s = list.FirstOrDefault(x => x.Id == b.Id);
+                    if (s is not null)
+                    {
+                        s.EndedUtc = now;
+                        s.LastViewerUtc = now;
+                    }
+                });
+                stopped++;
+            }
+
+            return stopped;
+        }
+        finally
+        {
+            _tickLock.Release();
+        }
     }
 
     // Stop recording buffers on channels nobody has watched for a while (unless kept).

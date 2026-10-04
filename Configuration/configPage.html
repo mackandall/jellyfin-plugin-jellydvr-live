@@ -43,6 +43,7 @@
                     <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="DlStopAfterLeaving">Stop buffering after the viewer stops or changes channel (minutes)</label>
                         <input id="DlStopAfterLeaving" type="number" min="0" max="240" is="emby-input" />
+                        <div class="fieldDescription">How long the tuner input stays held after Back or a channel change, so a quick return still finds the buffer. 0 frees it at once (good with only a couple of tuners). Pressing Stop in an app that supports it always frees it at once.</div>
                     </div>
 
                     <div class="inputContainer">

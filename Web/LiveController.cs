@@ -42,6 +42,18 @@ public sealed class LiveController : ControllerBase
     }
 
     /// <summary>
+    /// The viewer pressed Stop: stop buffering this channel now to free its tuner input (unless
+    /// kept, a real recording, or someone else is watching).
+    /// </summary>
+    [HttpPost("Channel/{channelId}/Stop")]
+    public async Task<IActionResult> Stop([FromRoute] Guid channelId)
+    {
+        var deviceId = User.FindFirst("Jellyfin-DeviceId")?.Value;
+        var stopped = await _manager.StopChannelAsync(channelId, deviceId).ConfigureAwait(false);
+        return Ok(new { Stopped = stopped });
+    }
+
+    /// <summary>
     /// Guide programmes that are only being recorded as a buffer (not kept, not a real scheduled
     /// recording), so guides can draw their recording mark fainter.
     /// </summary>
