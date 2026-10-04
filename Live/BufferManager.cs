@@ -168,11 +168,30 @@ public sealed class BufferManager : BackgroundService
     private static string? ViewerKey(string? sessionId, string? deviceId, string? playSessionId) =>
         !string.IsNullOrEmpty(sessionId) ? sessionId : !string.IsNullOrEmpty(deviceId) ? deviceId : playSessionId;
 
-    /// <summary>A viewer asked to start buffering this channel (on-demand mode, or to be sure).</summary>
+    /// <summary>
+    /// A viewer asked to buffer this channel now (on-demand mode, or Pause in an app): starts at
+    /// once, without waiting out the surfing delay. Waits for a running check rather than skipping.
+    /// </summary>
     public async Task RequestBufferAsync(Guid channelId)
     {
         _requested[channelId] = DateTime.UtcNow;
-        await TickSafeAsync().ConfigureAwait(false);
+        if (!await _tickLock.WaitAsync(TimeSpan.FromSeconds(30), _stopping).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        try
+        {
+            await TickAsync(_stopping).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Live buffer check failed");
+        }
+        finally
+        {
+            _tickLock.Release();
+        }
     }
 
     /// <summary>Keep a buffer: it becomes an ordinary recording (untagged, recorded to the end, never deleted here).</summary>
@@ -242,8 +261,9 @@ public sealed class BufferManager : BackgroundService
         var wanted = cfg.Mode switch
         {
             // Only channels someone has stayed on long enough: surfing past one starts nothing.
+            // ... or that a viewer asked for (Pause), at once.
             PluginConfiguration.ModeFromTuneIn => _viewers.Values
-                .Where(v => now - v.TunedInUtc >= settled)
+                .Where(v => now - v.TunedInUtc >= settled || _requested.ContainsKey(v.ChannelId))
                 .Select(v => v.ChannelId)
                 .ToHashSet(),
             PluginConfiguration.ModeOnDemand => _requested.Keys.Where(watched.ContainsKey).ToHashSet(),
