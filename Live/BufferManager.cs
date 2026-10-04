@@ -76,6 +76,31 @@ public sealed class BufferManager : BackgroundService
 
     public IReadOnlyList<LiveBuffer> Buffers => _store.Snapshot();
 
+    /// <summary>
+    /// A channel's buffers, with any just-started recording's file and library item looked up now
+    /// rather than at the next check (an app is waiting to open it).
+    /// </summary>
+    public IReadOnlyList<LiveBuffer> BuffersOf(Guid channelId)
+    {
+        var recordings = Recordings;
+        if (_store.Snapshot().Any(b => b.ChannelId == channelId && b.IsRecording && b.ItemId is null && b.TimerId is not null))
+        {
+            _store.Update(list =>
+            {
+                foreach (var b in list.Where(b => b.ChannelId == channelId && b.IsRecording && b.ItemId is null && b.TimerId is not null))
+                {
+                    b.Path ??= recordings?.GetActiveRecordingPath(b.TimerId!);
+                    if (b.Path is not null)
+                    {
+                        b.ItemId = _libraryManager.FindByPath(b.Path, false)?.Id;
+                    }
+                }
+            });
+        }
+
+        return _store.Snapshot().Where(b => b.ChannelId == channelId).OrderBy(b => b.StartedUtc).ToList();
+    }
+
     public IReadOnlyList<Viewer> Viewers => _viewers.Values.ToList();
 
     // ---- events ----------------------------------------------------------------------------
@@ -192,6 +217,10 @@ public sealed class BufferManager : BackgroundService
         {
             _tickLock.Release();
         }
+
+        // The recording's file and library item turn up a few seconds after the timer fires.
+        _ = TickAfterAsync(TimeSpan.FromSeconds(3));
+        _ = TickAfterAsync(TimeSpan.FromSeconds(10));
     }
 
     /// <summary>Keep a buffer: it becomes an ordinary recording (untagged, recorded to the end, never deleted here).</summary>

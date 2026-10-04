@@ -30,7 +30,7 @@ public sealed class LiveController : ControllerBase
         Ok(new
         {
             Mode = Plugin.Instance?.Configuration.Mode,
-            Buffers = _manager.Buffers.Where(b => b.ChannelId == channelId).OrderBy(b => b.StartedUtc).Select(Dto)
+            Buffers = _manager.BuffersOf(channelId).Select(Dto)
         });
 
     /// <summary>Start buffering a channel now (on-demand mode; harmless in from-tune-in mode).</summary>
