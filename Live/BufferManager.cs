@@ -258,17 +258,44 @@ public sealed class BufferManager : BackgroundService
     }
 
     /// <summary>Keep a buffer: it becomes an ordinary recording (untagged, recorded to the end, never deleted here).</summary>
-    public async Task<LiveBuffer?> SetKeptAsync(string bufferId, bool kept)
+    /// <summary>Why <see cref="SetKeptAsync"/> refused (null when it didn't).</summary>
+    public sealed class KeepRefused : Exception
+    {
+        public KeepRefused(string message) : base(message)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Keep or un-keep a buffer for <paramref name="userId"/>. Un-keeping (which lets it be deleted)
+    /// is for whoever kept it, or an administrator.
+    /// </summary>
+    public async Task<LiveBuffer?> SetKeptAsync(string bufferId, bool kept, Guid userId, bool isAdmin)
     {
         LiveBuffer? result = null;
+        var refused = false;
         _store.Update(list =>
         {
             result = list.FirstOrDefault(b => b.Id == bufferId);
-            if (result is not null)
+            if (result is null)
             {
-                result.Kept = kept;
+                return;
             }
+
+            if (!kept && result.Kept && result.KeptBy is { } by && by != userId && !isAdmin)
+            {
+                refused = true;
+                return;
+            }
+
+            result.Kept = kept;
+            result.KeptBy = kept ? userId : null;
         });
+        if (refused)
+        {
+            throw new KeepRefused("Someone else kept this recording: only they or an administrator can let it go.");
+        }
+
         if (result is not null)
         {
             await ApplyTagAsync(result).ConfigureAwait(false);

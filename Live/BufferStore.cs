@@ -53,6 +53,9 @@ public sealed class LiveBuffer
     /// <summary>A viewer chose to keep it: now an ordinary recording, never deleted by this plugin.</summary>
     public bool Kept { get; set; }
 
+    /// <summary>Who kept it (a Jellyfin user id): only they, or an administrator, can un-keep it.</summary>
+    public Guid? KeptBy { get; set; }
+
     /// <summary>
     /// False when the programme was already being recorded by a real (scheduled) timer: that
     /// recording serves as the buffer, but this plugin never stops, tags or deletes it.

@@ -14,7 +14,8 @@ namespace Jellyfin.Plugin.DvrLive.Web;
 /// </summary>
 [ApiController]
 [Route("JellyDvrLive")]
-[Authorize]
+// Live TV users only: starting a buffer takes a tuner input.
+[Authorize(Policy = Policies.LiveTvAccess)]
 public sealed class LiveController : ControllerBase
 {
     private readonly BufferManager _manager;
@@ -93,8 +94,21 @@ public sealed class LiveController : ControllerBase
 
     private async Task<IActionResult> SetKept(string bufferId, bool kept)
     {
-        var b = await _manager.SetKeptAsync(bufferId, kept).ConfigureAwait(false);
-        return b is null ? NotFound() : Ok(Dto(b));
+        var userId = User.FindFirst("Jellyfin-UserId")?.Value is { } id && Guid.TryParse(id, out var g) ? g : Guid.Empty;
+        if (userId == Guid.Empty)
+        {
+            return Forbid();
+        }
+
+        try
+        {
+            var b = await _manager.SetKeptAsync(bufferId, kept, userId, User.IsInRole("Administrator")).ConfigureAwait(false);
+            return b is null ? NotFound() : Ok(Dto(b));
+        }
+        catch (BufferManager.KeepRefused e)
+        {
+            return StatusCode(403, new { Message = e.Message });
+        }
     }
 
     private static object Dto(LiveBuffer b) => new
