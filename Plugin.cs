@@ -37,6 +37,13 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 
     public override Guid Id => PluginId;
 
+    /// <summary>Uninstalled from the dashboard: stop and delete its buffers while it still can.</summary>
+    public override void OnUninstalling()
+    {
+        Live.BufferManager.Instance?.ReleaseAllForUninstall();
+        base.OnUninstalling();
+    }
+
     public IEnumerable<PluginPageInfo> GetPages()
     {
         yield return new PluginPageInfo

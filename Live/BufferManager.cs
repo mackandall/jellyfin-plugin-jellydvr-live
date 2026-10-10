@@ -64,6 +64,40 @@ public sealed class BufferManager : BackgroundService
         _config = config;
         _serviceProvider = serviceProvider;
         _store = store;
+        Instance = this;
+    }
+
+    /// <summary>The running manager, for the plugin's uninstall clean-up (it has no services of its own).</summary>
+    internal static BufferManager? Instance { get; private set; }
+
+    /// <summary>
+    /// The plugin is being uninstalled: stop every buffer it's recording and delete the ones nobody
+    /// kept. Otherwise, once the plugin is gone, Jellyfin would carry on (and after a restart resume)
+    /// those timers as ordinary recordings, and nothing would ever delete them.
+    /// </summary>
+    public void ReleaseAllForUninstall()
+    {
+        foreach (var b in _store.Snapshot().Where(b => b.Owned && !b.Kept))
+        {
+            if (b.IsRecording && b.TimerId is not null)
+            {
+                try
+                {
+                    LiveTv.CancelTimer(b.TimerId).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Timer {Id} already gone", b.TimerId);
+                }
+            }
+
+            if (b.Path is not null)
+            {
+                DeleteBuffer(b);
+            }
+        }
+
+        _logger.LogInformation("JellyDVR Live uninstalled: its buffers are stopped and the unkept ones deleted");
     }
 
     private static PluginConfiguration Config => Plugin.Instance?.Configuration ?? new PluginConfiguration();
@@ -827,7 +861,11 @@ public sealed class BufferManager : BackgroundService
     private List<string> RecordingRoots()
     {
         var tv = _config.GetConfiguration<LiveTvOptions>("livetv");
-        return new[] { tv.RecordingPath, tv.MovieRecordingPath, tv.SeriesRecordingPath }
+        // With no recording path set (a new server), Jellyfin records to <data>/livetv/recordings.
+        var general = string.IsNullOrWhiteSpace(tv.RecordingPath)
+            ? Path.Combine(_config.CommonApplicationPaths.DataPath, "livetv", "recordings")
+            : tv.RecordingPath;
+        return new[] { general, tv.MovieRecordingPath, tv.SeriesRecordingPath }
             .Where(p => !string.IsNullOrWhiteSpace(p))
             .Select(p => p!.TrimEnd('/'))
             .Distinct(StringComparer.Ordinal)
