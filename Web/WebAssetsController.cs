@@ -27,6 +27,8 @@ public sealed class WebAssetsController : ControllerBase
         await using var stream = assembly.GetManifestResourceStream(resourceName)
             ?? throw new FileNotFoundException($"Embedded resource not found: {resourceName}");
         using var reader = new StreamReader(stream);
+        // Always re-checked: after a plugin update a plain page reload must run the new script.
+        Response.Headers.CacheControl = "no-cache";
         return Content(await reader.ReadToEndAsync().ConfigureAwait(false), "application/javascript");
     }
 }

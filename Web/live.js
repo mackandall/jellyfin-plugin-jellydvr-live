@@ -6,7 +6,9 @@
  *     normal recording controls can rewind past tune-in, skip commercials, or carry on later
  *     from another device. Pausing itself stays on the live stream.
  *   - "Keep" (bookmark icon): keeps the programme on now as a real recording.
- * While a buffer recording plays, only "Keep" shows. In the guide, the recording mark of a
+ *   - "Stop" (stop icon): stops watching and stops the channel's buffer at once, so its tuner is
+ *     free straight away. Leaving with Back keeps the buffer for the "stop after leaving" time.
+ * While a buffer recording plays, "Keep" shows, and "Stop" while that buffer is still recording. In the guide, the recording mark of a
  * programme that is only being buffered is drawn faint, so a solid red dot always means a real
  * recording.
  *
@@ -48,10 +50,27 @@
 
   // ---- buttons -------------------------------------------------------------------------------
 
-  function button(cls, icon, title) {
-    var b = document.querySelector('.videoOsdBottom .' + cls);
+  // The player bar on screen. jellyfin-web can leave an earlier player page in the document,
+  // hidden, after playback stops; buttons left in it must not count as "already there".
+  function osd() {
+    var bars = document.querySelectorAll('.videoOsdBottom');
+    for (var i = bars.length - 1; i >= 0; i--) {
+      var page = bars[i].closest('#videoOsdPage');
+      if (!page || !page.classList.contains('hide')) { return bars[i]; }
+    }
+    return null;
+  }
+
+  function find(cls) {
+    var bar = osd();
+    return bar ? bar.querySelector('.' + cls) : null;
+  }
+
+  // before: the class of the player button the new one goes in front of.
+  function button(cls, icon, title, before) {
+    var b = find(cls);
     if (b) { return b; }
-    var settings = document.querySelector('.videoOsdBottom .btnVideoOsdSettings');
+    var settings = find(before || 'btnVideoOsdSettings');
     if (!settings) { return null; }
     b = document.createElement('button');
     b.type = 'button';
@@ -64,12 +83,12 @@
   }
 
   function removeButtons() {
-    document.querySelectorAll('.jdvrLiveBuffer, .jdvrLiveKeep').forEach(function (b) { b.remove(); });
+    document.querySelectorAll('.jdvrLiveBuffer, .jdvrLiveKeep, .jdvrLiveStop').forEach(function (b) { b.remove(); });
   }
 
   function setKeepButton(buffer) {
     if (!buffer || !buffer.Owned) {
-      var old = document.querySelector('.videoOsdBottom .jdvrLiveKeep');
+      var old = find('jdvrLiveKeep');
       if (old) { old.remove(); }
       return;
     }
@@ -82,6 +101,25 @@
         Object.assign(buffer, updated);
         setKeepButton(buffer);
       });
+    };
+  }
+
+  // Stop: the server drops this browser as a viewer and stops the channel's buffer (not a kept
+  // one, a real recording, or one someone else is watching); then this browser stops playing,
+  // like a remote-control Stop, which closes the live stream.
+  function setStopButton(session, channelId) {
+    if (!channelId) {
+      var old = find('jdvrLiveStop');
+      if (old) { old.remove(); }
+      return;
+    }
+    // With the transport buttons, right after Play/Pause.
+    var b = button('jdvrLiveStop', 'stop', 'Stop watching and free the tuner now', 'btnFastForward');
+    if (!b) { return; }
+    b.onclick = function () {
+      var stopPlaying = function () { post('Sessions/' + session.Id + '/Playing/Stop'); };
+      log('stopping channel ' + channelId);
+      post('JellyDvrLive/Channel/' + channelId + '/Stop').then(stopPlaying, stopPlaying);
     };
   }
 
@@ -148,16 +186,17 @@
     if (replay) {
       replay.onclick = function () { openBuffer(session, video); };
     } else {
-      var old = document.querySelector('.videoOsdBottom .jdvrLiveBuffer');
+      var old = find('jdvrLiveBuffer');
       if (old) { old.remove(); }
     }
     setKeepButton(currentBuffer());
+    setStopButton(session, channelId);
   }
 
   // ---- a recording (maybe a buffer) --------------------------------------------------------
 
   function updateItem(itemId, video) {
-    var old = document.querySelector('.videoOsdBottom .jdvrLiveBuffer');
+    var old = find('jdvrLiveBuffer');
     if (old) { old.remove(); }
     if (pendingSeek && Date.now() > pendingSeek.until) { pendingSeek = null; }
     if (pendingSeek && pendingSeek.itemId === normId(itemId) && video.readyState >= 1) {
@@ -178,6 +217,10 @@
       return;
     }
     if (state.itemBuffer) { setKeepButton(state.itemBuffer); }
+    var live = state.itemBuffer && state.itemBuffer.Recording && state.itemBuffer.Owned && !state.itemBuffer.Kept;
+    ownSession().then(function (session) {
+      if (session && state.itemId === itemId) { setStopButton(session, live ? state.itemBuffer.ChannelId : null); }
+    });
   }
 
   // ---- guide: fainter recording mark for programmes that are only a buffer ----------------
@@ -215,7 +258,7 @@
   function tick() {
     try { styleGuide(); } catch (e) { log('guide marks failed: ' + e); }
     var video = document.querySelector('video');
-    if (!video || !document.querySelector('.videoOsdBottom')) {
+    if (!video || !osd()) {
       if (state.key || state.itemId) { state = { key: null }; }
       return;
     }
