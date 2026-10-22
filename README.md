@@ -64,6 +64,26 @@ programme on now. While a buffer recording plays, only Keep shows. Pausing stays
 
 ## Install
 
+### From the JellyDVR plugin repository (no build needed)
+
+1. Dashboard → Plugins → **Repositories** → add (one list for all the JellyDVR plugins):
+   ```
+   https://raw.githubusercontent.com/mackandall/jdvr-client/main/plugins/manifest.json
+   ```
+2. Dashboard → Plugins → **Catalog** → **JellyDVR Live** → Install, then restart Jellyfin.
+
+### Web player buttons (optional)
+
+jellyfin-web has to load one script for this. Its `index.html` belongs to root, so it's a command run once
+with sudo, and again after every jellyfin-web upgrade (which overwrites it):
+
+```
+curl -fsSLO https://raw.githubusercontent.com/mackandall/jellyfin-plugin-jellydvr-live/main/install-web.sh
+sudo bash install-web.sh
+```
+
+### Or build from source
+
 ```
 dotnet build -c Release
 sudo ./install.sh       # restarts Jellyfin
