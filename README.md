@@ -62,6 +62,17 @@ While a live channel plays in jellyfin-web, two buttons appear next to the playe
 recording controls rewind past tune-in and skip commercials — and **Keep** (bookmark icon) keeps the
 programme on now. While a buffer recording plays, only Keep shows. Pausing stays on the live stream.
 
+## Screenshots
+
+From a real server (Jellyfin 12.2). The web player on a live channel: **Keep** (bookmark) and **Buffer**
+(history) beside the Settings button:
+
+![Web player buttons](docs/screenshots/player-buttons.jpg)
+
+Settings (Dashboard → Plugins → JellyDVR Live):
+
+![Settings](docs/screenshots/settings.jpg)
+
 ## Install
 
 ### From the JellyDVR plugin repository (no build needed)
