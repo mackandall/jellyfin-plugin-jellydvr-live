@@ -42,6 +42,11 @@ public sealed class BufferManager : BackgroundService
     private readonly BufferStore _store;
     private readonly SemaphoreSlim _tickLock = new(1, 1);
     private readonly ConcurrentDictionary<string, Viewer> _viewers = new(StringComparer.Ordinal);
+
+    // Play sessions that stopped (or pressed Stop): a progress report still on its way when the
+    // stop arrived would otherwise bring the viewer back, and start a buffer nobody watches (2026-11-18).
+    private readonly ConcurrentDictionary<string, DateTime> _ended = new(StringComparer.Ordinal);
+    private static readonly TimeSpan EndedMemory = TimeSpan.FromMinutes(2);
     private readonly ConcurrentDictionary<Guid, DateTime> _requested = new();
     private readonly ConcurrentDictionary<Guid, DateTime> _failedUntil = new();
 
@@ -173,6 +178,11 @@ public sealed class BufferManager : BackgroundService
         }
 
         var now = DateTime.UtcNow;
+        if (_ended.TryGetValue(key, out var endedAt) && now - endedAt < EndedMemory)
+        {
+            return; // late report from a stopped play session
+        }
+
         _viewers.TryGetValue(key, out var old);
         if (e.Item is LiveTvChannel channel)
         {
@@ -183,7 +193,7 @@ public sealed class BufferManager : BackgroundService
             }
 
             _leftCleanly.TryRemove(channel.Id, out _);
-            _viewers[key] = new Viewer(channel.Id, channel.Name, e.Session?.UserName ?? string.Empty, e.ClientName ?? string.Empty, now, isNew ? now : old!.TunedInUtc);
+            _viewers[key] = new Viewer(channel.Id, channel.Name, e.Session?.UserName ?? string.Empty, e.ClientName ?? string.Empty, now, isNew ? now : old!.TunedInUtc, e.Session?.Id);
             if (isNew)
             {
                 // Tuned in (or changed channel): check now (a channel just left may have to give
@@ -192,17 +202,28 @@ public sealed class BufferManager : BackgroundService
                 _ = TickAfterAsync(TimeSpan.FromSeconds(Math.Max(0, Config.StartAfterSeconds) + 1));
             }
         }
-        else if (old is not null)
+        else
         {
-            // Playing something else now (e.g. the buffer itself): no longer on a live channel.
-            _leftCleanly[old.ChannelId] = true;
-            _viewers.TryRemove(key, out _);
+            // Playing something else now (e.g. the buffer itself): no longer on a live channel, in
+            // any of its pictures.
+            foreach (var (k, v) in _viewers)
+            {
+                if ((k == key || (e.Session?.Id is { } sid && v.SessionId == sid)) && _viewers.TryRemove(k, out _))
+                {
+                    _leftCleanly[v.ChannelId] = true;
+                }
+            }
         }
     }
 
     private void OnPlaybackStopped(object? sender, PlaybackStopEventArgs e)
     {
         var key = ViewerKey(e.Session?.Id, e.DeviceId, e.PlaySessionId);
+        if (key is not null)
+        {
+            _ended[key] = DateTime.UtcNow;
+        }
+
         if (key is not null && e.Item is LiveTvChannel channel && _viewers.TryRemove(key, out _))
         {
             _leftCleanly[channel.Id] = true;
@@ -224,8 +245,11 @@ public sealed class BufferManager : BackgroundService
         await TickSafeAsync().ConfigureAwait(false);
     }
 
+    // One viewer per play session: an app showing two channels at once (picture in picture) plays
+    // each in its own, and one per app session made them overwrite each other, so neither ever
+    // counted as settled on its channel.
     private static string? ViewerKey(string? sessionId, string? deviceId, string? playSessionId) =>
-        !string.IsNullOrEmpty(sessionId) ? sessionId : !string.IsNullOrEmpty(deviceId) ? deviceId : playSessionId;
+        !string.IsNullOrEmpty(playSessionId) ? playSessionId : !string.IsNullOrEmpty(sessionId) ? sessionId : deviceId;
 
     /// <summary>
     /// A viewer asked to buffer this channel now (on-demand mode, or Pause in an app): starts at
@@ -341,7 +365,17 @@ public sealed class BufferManager : BackgroundService
         {
             if (now - v.LastSeenUtc > ViewerTimeout && _viewers.TryRemove(key, out _))
             {
-                _leftCleanly[v.ChannelId] = false; // vanished without a stop
+                // Vanished without a stop; but an app still reporting another channel is alive
+                // (it moved on without saying so), so the short wait.
+                _leftCleanly[v.ChannelId] = v.SessionId is not null && _viewers.Values.Any(o => o.SessionId == v.SessionId && now - o.LastSeenUtc <= ViewerTimeout);
+            }
+        }
+
+        foreach (var (key, at) in _ended)
+        {
+            if (now - at > EndedMemory)
+            {
+                _ended.TryRemove(key, out _);
             }
         }
 
@@ -686,10 +720,12 @@ public sealed class BufferManager : BackgroundService
             var mine = _sessionManager.Sessions
                 .Where(s => !string.IsNullOrEmpty(callerDeviceId) && string.Equals(s.DeviceId, callerDeviceId, StringComparison.Ordinal))
                 .ToList();
-            foreach (var s in mine)
+            var mineIds = mine.Select(s => s.Id).ToHashSet(StringComparer.Ordinal);
+            foreach (var (key, v) in _viewers)
             {
-                if (_viewers.TryRemove(s.Id, out _))
+                if (v.ChannelId == channelId && (mineIds.Contains(key) || (v.SessionId is not null && mineIds.Contains(v.SessionId))) && _viewers.TryRemove(key, out _))
                 {
+                    _ended[key] = DateTime.UtcNow;
                     _leftCleanly[channelId] = true;
                 }
             }
@@ -937,5 +973,5 @@ public sealed class BufferManager : BackgroundService
         }
     }
 
-    public sealed record Viewer(Guid ChannelId, string ChannelName, string UserName, string Client, DateTime LastSeenUtc, DateTime TunedInUtc);
+    public sealed record Viewer(Guid ChannelId, string ChannelName, string UserName, string Client, DateTime LastSeenUtc, DateTime TunedInUtc, string? SessionId = null);
 }
