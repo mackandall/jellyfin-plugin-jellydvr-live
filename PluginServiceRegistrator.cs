@@ -16,6 +16,8 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<BufferStore>();
         serviceCollection.AddSingleton<BufferManager>();
         serviceCollection.AddHostedService(sp => sp.GetRequiredService<BufferManager>());
+        serviceCollection.AddSingleton<Multiview.MultiviewManager>();
+        serviceCollection.AddHostedService(sp => sp.GetRequiredService<Multiview.MultiviewManager>());
 
         // Jellyfin builds its MVC ApplicationPartManager from its own assembly before any
         // plugin loads and never re-scans, so a plugin's controllers are silently absent

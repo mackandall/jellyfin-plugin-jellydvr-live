@@ -38,4 +38,19 @@ public class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>Library tag put on buffer recordings until they're kept (other plugins key off it).</summary>
     public string BufferTag { get; set; } = "Live buffer";
+
+    /// <summary>Server Multiview: the server combines several channels into one picture for TVs that can't play several.</summary>
+    public bool MultiviewEnabled { get; set; } = true;
+
+    /// <summary>How many server Multiviews may run at once (each one keeps the GPU busy).</summary>
+    public int MultiviewMax { get; set; } = 1;
+
+    /// <summary>The GPU's render device (/dev/dri/renderD129); empty = the first that passes the test.</summary>
+    public string MultiviewDevice { get; set; } = string.Empty;
+
+    /// <summary>The ffmpeg to use; empty = Jellyfin's own.</summary>
+    public string MultiviewFfmpeg { get; set; } = string.Empty;
+
+    /// <summary>The combined picture's bit rate (Mb/s).</summary>
+    public int MultiviewBitrateMbps { get; set; } = 10;
 }
