@@ -785,7 +785,7 @@ public sealed class BufferManager : BackgroundService
             var now = DateTime.UtcNow;
             foreach (var b in _store.Snapshot().Where(b => b.ChannelId == channelId && b.IsRecording && b.Owned && !b.Kept && b.TimerId is not null))
             {
-                NoteActivePath(b);
+                await NoteActivePathAsync(b).ConfigureAwait(false);
                 try
                 {
                     await LiveTv.CancelTimer(b.TimerId!).ConfigureAwait(false);
@@ -820,16 +820,22 @@ public sealed class BufferManager : BackgroundService
     /// The buffer's file, read while it is still recording: a buffer stopped within seconds of
     /// starting never had it noted, and other plugins (Episode History) know buffers by it.
     /// </summary>
-    private void NoteActivePath(LiveBuffer b)
+    private async Task NoteActivePathAsync(LiveBuffer b)
     {
         if (b.Path is not null || b.TimerId is null || Recordings is not { } recordings)
         {
             return;
         }
 
-        var path = recordings.GetActiveRecordingPath(b.TimerId);
+        // Jellyfin knows a running recording by the timer's external id (as in RefreshStates):
+        // by the timer's own id it found nothing, and the buffer was left without its file (Antwone Fisher, 2026-11-24).
+        var timer = (await LiveTv.GetTimers(new TimerQuery(), CancellationToken.None).ConfigureAwait(false)).Items
+            .FirstOrDefault(t => t.Id == b.TimerId);
+        var path = (timer?.ExternalId is { } external ? recordings.GetActiveRecordingPath(external) : null)
+            ?? recordings.GetActiveRecordingPath(b.TimerId);
         if (path is null)
         {
+            _logger.LogWarning("Buffer of {Program} on {Channel}: its recording's file wasn't found before stopping it", b.ProgramName, b.ChannelName);
             return;
         }
 
@@ -854,7 +860,7 @@ public sealed class BufferManager : BackgroundService
         foreach (var b in _store.Snapshot().Where(b => b.IsRecording && b.Owned && !b.Kept && b.TimerId is not null
             && now - b.LastViewerUtc > Grace(b)))
         {
-            NoteActivePath(b);
+            await NoteActivePathAsync(b).ConfigureAwait(false);
             try
             {
                 await LiveTv.CancelTimer(b.TimerId!).ConfigureAwait(false);
