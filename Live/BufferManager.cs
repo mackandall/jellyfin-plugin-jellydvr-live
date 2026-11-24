@@ -537,6 +537,12 @@ public sealed class BufferManager : BackgroundService
             await EnsureProgrammeAsync(channelId, channelName, programme, timers, ct).ConfigureAwait(false);
             _failedUntil.TryRemove(programme.Id, out _);
         }
+        catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            // Jellyfin's own wait for the channel gave up (not us stopping): said, not swallowed.
+            _failedUntil[programme.Id] = now.AddMinutes(5);
+            _logger.LogWarning(ex, "Starting the buffer of {Program} on {Channel} was cancelled; will retry in 5 minutes", DisplayName(programme), channelName);
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _failedUntil[programme.Id] = now.AddMinutes(5);
@@ -577,43 +583,81 @@ public sealed class BufferManager : BackgroundService
                 buffer.StartedUtc = existing.StartDate.AddSeconds(-existing.PrePaddingSeconds);
             }
         }
+
+        // In the store before the timer is made: Jellyfin answers CreateTimer only once the channel
+        // has opened (16–27 s on slow channels), and a viewer who left by then stopped a recording
+        // nobody knew was a buffer — Episode History then flagged it to record again
+        // (Beachfront Bargain Hunt, The Facts of Life, 2026-11-20/23).
+        _store.Update(list => list.Add(buffer));
+
+        if (existing is null)
+        {
+            try
+            {
+                var defaults = await LiveTv.GetNewTimerDefaults(programmeId, ct).ConfigureAwait(false);
+                await LiveTv.CreateTimer(
+                    new TimerInfoDto
+                    {
+                        ProgramId = programmeId,
+                        ChannelId = defaults.ChannelId,
+                        ServiceName = defaults.ServiceName,
+                        Name = defaults.Name,
+                        StartDate = defaults.StartDate,
+                        EndDate = defaults.EndDate,
+                        PrePaddingSeconds = 0,
+                        PostPaddingSeconds = 0,
+                        IsPrePaddingRequired = false,
+                        IsPostPaddingRequired = false,
+                        KeepUntil = defaults.KeepUntil
+                    },
+                    ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Even when the call above was cancelled or failed, the timer may be there and recording.
+                var created = (await LiveTv.GetTimers(new TimerQuery(), CancellationToken.None).ConfigureAwait(false)).Items
+                    .FirstOrDefault(t => Guid.TryParse(t.ProgramId, out var pid) && pid == programme.Id
+                        && (t.Status == RecordingStatus.New || t.Status == RecordingStatus.InProgress));
+                _store.Update(list =>
+                {
+                    var mine = list.FirstOrDefault(x => x.Id == buffer.Id);
+                    if (created is null)
+                    {
+                        if (mine is not null && mine.Path is null)
+                        {
+                            list.Remove(mine); // nothing is recording it
+                        }
+
+                        return;
+                    }
+
+                    // Jellyfin gives a programme's one-off timer the same id every time, so a buffer from
+                    // an earlier visit would think this new recording is its own resumed one. Only the
+                    // newest buffer owns the timer.
+                    foreach (var older in list.Where(x => x.TimerId == created.Id && x.Id != buffer.Id))
+                    {
+                        older.TimerId = null;
+                    }
+
+                    if (mine is not null)
+                    {
+                        mine.TimerId = created.Id;
+                    }
+                });
+                buffer.TimerId = created?.Id;
+            }
+        }
         else
         {
-            var defaults = await LiveTv.GetNewTimerDefaults(programmeId, ct).ConfigureAwait(false);
-            await LiveTv.CreateTimer(
-                new TimerInfoDto
+            _store.Update(list =>
+            {
+                foreach (var older in list.Where(x => x.TimerId == buffer.TimerId && x.Id != buffer.Id))
                 {
-                    ProgramId = programmeId,
-                    ChannelId = defaults.ChannelId,
-                    ServiceName = defaults.ServiceName,
-                    Name = defaults.Name,
-                    StartDate = defaults.StartDate,
-                    EndDate = defaults.EndDate,
-                    PrePaddingSeconds = 0,
-                    PostPaddingSeconds = 0,
-                    IsPrePaddingRequired = false,
-                    IsPostPaddingRequired = false,
-                    KeepUntil = defaults.KeepUntil
-                },
-                ct).ConfigureAwait(false);
-            var created = (await LiveTv.GetTimers(new TimerQuery(), ct).ConfigureAwait(false)).Items
-                .FirstOrDefault(t => Guid.TryParse(t.ProgramId, out var pid) && pid == programme.Id
-                    && (t.Status == RecordingStatus.New || t.Status == RecordingStatus.InProgress));
-            buffer.TimerId = created?.Id;
+                    older.TimerId = null;
+                }
+            });
         }
 
-        _store.Update(list =>
-        {
-            // Jellyfin gives a programme's one-off timer the same id every time, so a buffer from
-            // an earlier visit would think this new recording is its own resumed one. Only the
-            // newest buffer owns the timer.
-            foreach (var older in list.Where(x => x.TimerId is not null && x.TimerId == buffer.TimerId))
-            {
-                older.TimerId = null;
-            }
-
-            list.Add(buffer);
-        });
         _logger.LogInformation(
             "Buffering {Program} on {Channel}{Note}",
             buffer.ProgramName,
@@ -741,6 +785,7 @@ public sealed class BufferManager : BackgroundService
             var now = DateTime.UtcNow;
             foreach (var b in _store.Snapshot().Where(b => b.ChannelId == channelId && b.IsRecording && b.Owned && !b.Kept && b.TimerId is not null))
             {
+                NoteActivePath(b);
                 try
                 {
                     await LiveTv.CancelTimer(b.TimerId!).ConfigureAwait(false);
@@ -771,6 +816,33 @@ public sealed class BufferManager : BackgroundService
         }
     }
 
+    /// <summary>
+    /// The buffer's file, read while it is still recording: a buffer stopped within seconds of
+    /// starting never had it noted, and other plugins (Episode History) know buffers by it.
+    /// </summary>
+    private void NoteActivePath(LiveBuffer b)
+    {
+        if (b.Path is not null || b.TimerId is null || Recordings is not { } recordings)
+        {
+            return;
+        }
+
+        var path = recordings.GetActiveRecordingPath(b.TimerId);
+        if (path is null)
+        {
+            return;
+        }
+
+        _store.Update(list =>
+        {
+            if (list.FirstOrDefault(x => x.Id == b.Id) is { } s && s.Path is null)
+            {
+                s.Path = path;
+                s.ItemId ??= _libraryManager.FindByPath(path, false)?.Id;
+            }
+        });
+    }
+
     // Stop recording buffers on channels nobody has watched for a while (unless kept).
     private async Task StopUnwatchedAsync(PluginConfiguration cfg, DateTime now)
     {
@@ -782,6 +854,7 @@ public sealed class BufferManager : BackgroundService
         foreach (var b in _store.Snapshot().Where(b => b.IsRecording && b.Owned && !b.Kept && b.TimerId is not null
             && now - b.LastViewerUtc > Grace(b)))
         {
+            NoteActivePath(b);
             try
             {
                 await LiveTv.CancelTimer(b.TimerId!).ConfigureAwait(false);
