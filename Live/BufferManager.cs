@@ -409,7 +409,7 @@ public sealed class BufferManager : BackgroundService
             _requested.TryRemove(id, out _); // request lapses once nobody watches
         }
 
-        var timers = (await LiveTv.GetTimers(new TimerQuery(), ct).ConfigureAwait(false)).Items;
+        var timers = (await TimerReader.AllAsync(_serviceProvider, ct).ConfigureAwait(false));
 
         RefreshStates(timers, watched, inBuffer, now);
 
@@ -615,7 +615,7 @@ public sealed class BufferManager : BackgroundService
             finally
             {
                 // Even when the call above was cancelled or failed, the timer may be there and recording.
-                var created = (await LiveTv.GetTimers(new TimerQuery(), CancellationToken.None).ConfigureAwait(false)).Items
+                var created = (await TimerReader.AllAsync(_serviceProvider, CancellationToken.None).ConfigureAwait(false))
                     .FirstOrDefault(t => Guid.TryParse(t.ProgramId, out var pid) && pid == programme.Id
                         && (t.Status == RecordingStatus.New || t.Status == RecordingStatus.InProgress));
                 _store.Update(list =>
@@ -829,7 +829,7 @@ public sealed class BufferManager : BackgroundService
 
         // Jellyfin knows a running recording by the timer's external id (as in RefreshStates):
         // by the timer's own id it found nothing, and the buffer was left without its file (Antwone Fisher, 2026-11-24).
-        var timer = (await LiveTv.GetTimers(new TimerQuery(), CancellationToken.None).ConfigureAwait(false)).Items
+        var timer = (await TimerReader.AllAsync(_serviceProvider, CancellationToken.None).ConfigureAwait(false))
             .FirstOrDefault(t => t.Id == b.TimerId);
         var path = (timer?.ExternalId is { } external ? recordings.GetActiveRecordingPath(external) : null)
             ?? recordings.GetActiveRecordingPath(b.TimerId);
